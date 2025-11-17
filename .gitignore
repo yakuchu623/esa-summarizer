@@ -25,7 +25,7 @@ pip-wheel-metadata/
 *.egg
 MANIFEST
 
-# 仮想環境/環境ファイル
+# 環境ファイル/環境変数
 .venv/
 venv/
 env/
@@ -34,6 +34,7 @@ ENV/
 .python-version
 .env
 .env.*
+!.env.example
 
 # PyInstaller
 *.spec

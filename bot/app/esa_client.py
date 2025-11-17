@@ -1,6 +1,9 @@
 import requests
+import logging
 from typing import Optional, Dict
 from config.settings import ESA_ACCESS_TOKEN, ESA_TEAM_NAME, ESA_API_BASE
+
+logger = logging.getLogger(__name__)
 
 
 class EsaClient:
@@ -17,11 +20,13 @@ class EsaClient:
         """記事番号から記事を取得"""
         url = f"{self.base_url}/posts/{post_number}"
         try:
+            logger.debug(f"esa APIリクエスト: {url}")
             response = requests.get(url, headers=self.headers)
             response.raise_for_status()
+            logger.info(f"記事取得成功: #{post_number}")
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"esa API Error: {e}")
+            logger.error(f"esa API Error (記事番号: {post_number}): {e}")
             return None
     
     def extract_post_number_from_url(self, url: str) -> Optional[int]:
