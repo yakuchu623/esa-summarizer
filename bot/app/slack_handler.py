@@ -53,7 +53,7 @@ class SlackBot:
                 text = event.get('text', '')
                 bot_id = event.get('bot_id')
                 bot_profile = event.get('bot_profile')
-            
+
             # チャンネルIDを取得
             channel_id = event.get('channel')
             logger.debug(f"チャンネルID: {channel_id}, 監視対象: {ESA_WATCH_CHANNEL_ID}")
@@ -64,10 +64,7 @@ class SlackBot:
                 return
             
             # esaアプリ（または他のBot）からのメッセージか確認
-            # bot_idまたはbot_profileがあればBotからのメッセージ
-            bot_id = event.get('bot_id')
-            bot_profile = event.get('bot_profile')
-            
+            # message_changed の場合はネスト内の bot 情報を使うため、ここで上書きしない
             logger.info(f"チャンネル '{channel_id}' でメッセージ検出: bot_id={bot_id}, bot_profile={bool(bot_profile)}")
             
             if not bot_id and not bot_profile:
@@ -76,9 +73,13 @@ class SlackBot:
             
             logger.info(f"Botメッセージを検出: bot_id={bot_id}, チャンネルID={channel_id}")
             
-            # esa URLを抽出（https://team.esa.io/posts/123 形式）
-            url_pattern = r'https?://[^\s]+\.esa\.io/posts/\d+'
-            urls = re.findall(url_pattern, text)
+            # esa URLを抽出（Slackのリンク形式 <url|title> にも対応）
+            raw_urls = re.findall(r'https?://[^\s>]+', text)
+            urls = []
+            for raw in raw_urls:
+                clean = self._clean_slack_url(raw)
+                if self._is_esa_post_url(clean):
+                    urls.append(clean)
             
             if not urls:
                 return  # esa URLが含まれていなければ無視
@@ -151,12 +152,15 @@ class SlackBot:
                 text = re.sub(r'--style\s+(bullet|paragraph)', '', text).strip()
             
             # URL抽出
-            url_match = re.search(r'https?://[^\s]+', text)
+            url_match = re.search(r'https?://[^\s>]+', text)
             if not url_match:
                 say(f"<@{user_id}> ❌ エラー: esaのURLを指定してください\n\n{self._get_help_message()}")
                 return
             
-            url = url_match.group(0)
+            url = self._clean_slack_url(url_match.group(0))
+            if not self._is_esa_post_url(url):
+                say(f"<@{user_id}> ❌ エラー: esaのURLを指定してください\n\n{self._get_help_message()}")
+                return
             
             # 処理中メッセージ
             say(f"<@{user_id}> 📝 要約を生成中です... (長さ: {length}, 形式: {style})")
@@ -376,6 +380,15 @@ class SlackBot:
             chunks.append(remaining[:split_index].rstrip())
             remaining = remaining[split_index:].lstrip()
         return chunks
+    
+    def _clean_slack_url(self, url: str) -> str:
+        """<https://...|title> 形式の余分な記号を除去"""
+        url = url.split('|', 1)[0]
+        return url.strip('<>').rstrip(')')
+    
+    def _is_esa_post_url(self, url: str) -> bool:
+        """esaの投稿URLか簡易判定"""
+        return bool(re.search(r'https?://[^/\s]+\.esa\.io/posts/\d+', url))
     
     def _get_help_message(self):
         """ヘルプメッセージ"""
