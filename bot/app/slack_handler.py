@@ -6,6 +6,8 @@ from config.settings import SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ESA_WATCH_CHANNEL_
 from app.debug_utils import step, log_kv, truncate
 import logging
 import re
+import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,11 @@ class SlackBot:
         self.app = App(token=SLACK_BOT_TOKEN)
         self.esa_client = EsaClient()
         self.gemini_client = GeminiClient()
+        # 同一イベントの重複処理防止（最近のイベントTSを保持）
+        self._seen_event_ts = deque(maxlen=500)
+        self._seen_event_ts_set = set()
+        # 直近に処理したURLのタイムスタンプ（短時間の重複投稿を防ぐ）
+        self._recent_urls = {}
         if DEBUG_VERBOSE:
             @self.app.middleware  # 全イベント生ボディをログ
             def log_raw(logger_mw, body, next):
@@ -35,9 +42,30 @@ class SlackBot:
                 logger.info(f"メッセージイベント受信: {truncate(str(event),800)}")
             with step("message_event"):
                 log_kv("message.meta", subtype=event.get('subtype'), channel=event.get('channel'))
+
+            # サブタイプは最初に取得しておく
+            subtype = event.get('subtype')
+            # チャンネルIDを先に取得（重複判定で使用）
+            channel_id = event.get('channel')
+            logger.debug(f"チャンネルID: {channel_id}, 監視対象: {ESA_WATCH_CHANNEL_ID}")
+
+            # 同一メッセージ（チャンネル+ts）の二重処理防止
+            msg_ts = event.get('ts')
+            if subtype == 'message_changed':
+                msg_ts = event.get('message', {}).get('ts') or msg_ts
+            dedupe_key = f"{channel_id}:{msg_ts}" if msg_ts else event.get('event_id')
+            if dedupe_key:
+                if dedupe_key in self._seen_event_ts_set:
+                    logger.debug(f"既に処理済みのイベントを検出: {dedupe_key}")
+                    return
+                # キャッシュ上限を超える場合は最古を捨てる
+                if len(self._seen_event_ts) >= self._seen_event_ts.maxlen:
+                    oldest = self._seen_event_ts.popleft()
+                    self._seen_event_ts_set.discard(oldest)
+                self._seen_event_ts.append(dedupe_key)
+                self._seen_event_ts_set.add(dedupe_key)
             
             # 削除のサブタイプは無視（bot_message, message_changedは処理する）
-            subtype = event.get('subtype')
             if subtype and subtype not in ['bot_message', 'message_changed']:
                 logger.debug(f"サブタイプ '{subtype}' のため無視")
                 return
@@ -54,10 +82,6 @@ class SlackBot:
                 bot_id = event.get('bot_id')
                 bot_profile = event.get('bot_profile')
 
-            # チャンネルIDを取得
-            channel_id = event.get('channel')
-            logger.debug(f"チャンネルID: {channel_id}, 監視対象: {ESA_WATCH_CHANNEL_ID}")
-            
             # 監視対象チャンネル以外は無視
             if not ESA_WATCH_CHANNEL_ID or channel_id != ESA_WATCH_CHANNEL_ID:
                 logger.debug(f"監視対象外のチャンネル '{channel_id}' のため無視")
@@ -73,13 +97,8 @@ class SlackBot:
             
             logger.info(f"Botメッセージを検出: bot_id={bot_id}, チャンネルID={channel_id}")
             
-            # esa URLを抽出（Slackのリンク形式 <url|title> にも対応）
-            raw_urls = re.findall(r'https?://[^\s>]+', text)
-            urls = []
-            for raw in raw_urls:
-                clean = self._clean_slack_url(raw)
-                if self._is_esa_post_url(clean):
-                    urls.append(clean)
+            # esa URLを抽出（text/blocks/attachments すべてを見る）
+            urls = self._collect_esa_urls(text, event.get('blocks'), event.get('attachments'))
             
             if not urls:
                 return  # esa URLが含まれていなければ無視
@@ -89,6 +108,11 @@ class SlackBot:
             for url in urls:
                 # URLのクリーンアップ（末尾の記号を除去）
                 url = re.sub(r'[)>]$', '', url)
+                
+                # URLの短時間重複処理を抑制
+                if not self._should_process_url(url):
+                    logger.debug(f"短時間の重複検出のためスキップ: {url}")
+                    continue
                 
                 if url in processed_urls:
                     continue
@@ -151,16 +175,12 @@ class SlackBot:
                 style = style_match.group(1)
                 text = re.sub(r'--style\s+(bullet|paragraph)', '', text).strip()
             
-            # URL抽出
-            url_match = re.search(r'https?://[^\s>]+', text)
-            if not url_match:
+            # URL抽出（text/blocks/attachments すべてを見る）
+            urls = self._collect_esa_urls(text, event.get('blocks'), event.get('attachments'))
+            if not urls:
                 say(f"<@{user_id}> ❌ エラー: esaのURLを指定してください\n\n{self._get_help_message()}")
                 return
-            
-            url = self._clean_slack_url(url_match.group(0))
-            if not self._is_esa_post_url(url):
-                say(f"<@{user_id}> ❌ エラー: esaのURLを指定してください\n\n{self._get_help_message()}")
-                return
+            url = urls[0]
             
             # 処理中メッセージ
             say(f"<@{user_id}> 📝 要約を生成中です... (長さ: {length}, 形式: {style})")
@@ -398,6 +418,19 @@ class SlackBot:
                 counter += 1
             lines.append(line)
         return "\n".join(lines)
+
+    def _should_process_url(self, url: str, ttl_sec: int = 300) -> bool:
+        """直近の同一URL要約を抑制する"""
+        now = time.time()
+        # 古いものをクリーンアップ
+        expired = [u for u, ts in self._recent_urls.items() if now - ts > ttl_sec]
+        for u in expired:
+            self._recent_urls.pop(u, None)
+        ts = self._recent_urls.get(url)
+        if ts and now - ts <= ttl_sec:
+            return False
+        self._recent_urls[url] = now
+        return True
     
     def _clean_slack_url(self, url: str) -> str:
         """<https://...|title> 形式の余分な記号を除去"""
@@ -407,6 +440,45 @@ class SlackBot:
     def _is_esa_post_url(self, url: str) -> bool:
         """esaの投稿URLか簡易判定"""
         return bool(re.search(r'https?://[^/\s]+\.esa\.io/posts/\d+', url))
+    
+    def _collect_esa_urls(self, text: str, blocks=None, attachments=None):
+        """text/blocks/attachments から esa の投稿URLを集める"""
+        urls = set()
+        # text から
+        for raw in re.findall(r'https?://[^\s>]+', text or ""):
+            clean = self._clean_slack_url(raw)
+            if self._is_esa_post_url(clean):
+                urls.add(clean)
+        # blocks から
+        for block in blocks or []:
+            if block.get('type') == 'rich_text':
+                for el in block.get('elements', []):
+                    if el.get('type') == 'rich_text_section':
+                        for sub in el.get('elements', []):
+                            if sub.get('type') == 'link' and sub.get('url'):
+                                clean = self._clean_slack_url(sub.get('url',''))
+                                if self._is_esa_post_url(clean):
+                                    urls.add(clean)
+                            elif sub.get('type') == 'text':
+                                for raw in re.findall(r'https?://[^\s>]+', sub.get('text','')):
+                                    clean = self._clean_slack_url(raw)
+                                    if self._is_esa_post_url(clean):
+                                        urls.add(clean)
+            elif block.get('type') == 'section' and 'text' in block:
+                for raw in re.findall(r'https?://[^\s>]+', block['text'].get('text','')):
+                    clean = self._clean_slack_url(raw)
+                    if self._is_esa_post_url(clean):
+                        urls.add(clean)
+        # attachments から
+        for att in attachments or []:
+            for key in ["original_url", "title_link", "from_url", "fallback", "text"]:
+                val = att.get(key)
+                if isinstance(val, str):
+                    for raw in re.findall(r'https?://[^\s>]+', val):
+                        clean = self._clean_slack_url(raw)
+                        if self._is_esa_post_url(clean):
+                            urls.add(clean)
+        return list(urls)
     
     def _get_help_message(self):
         """ヘルプメッセージ"""
