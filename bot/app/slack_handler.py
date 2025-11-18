@@ -54,6 +54,13 @@ class SlackBot:
                 bot_id = event.get('bot_id')
                 bot_profile = event.get('bot_profile')
             
+            # blocksのみの場合のフォールバック（esa通知でtextが空になるケース対応）
+            if not text and 'blocks' in event:
+                rebuilt = self._extract_text_from_blocks(event.get('blocks', []))
+                if rebuilt:
+                    text = rebuilt
+                    logger.debug(f"blocksから再構築したテキスト: {text[:200]}")
+            
             # チャンネルIDを取得
             channel_id = event.get('channel')
             logger.debug(f"チャンネルID: {channel_id}, 監視対象: {ESA_WATCH_CHANNEL_ID}")
@@ -76,9 +83,8 @@ class SlackBot:
             
             logger.info(f"Botメッセージを検出: bot_id={bot_id}, チャンネルID={channel_id}")
             
-            # esa URLを抽出（https://team.esa.io/posts/123 形式）
-            url_pattern = r'https?://[^\s]+\.esa\.io/posts/\d+'
-            urls = re.findall(url_pattern, text)
+            # esa URLを抽出（text/blocks/attachments すべてを見る）
+            urls = self._collect_esa_urls(text, event.get('blocks'), event.get('attachments'))
             
             if not urls:
                 return  # esa URLが含まれていなければ無視
@@ -108,18 +114,7 @@ class SlackBot:
             text = event.get('text', '') or ''
             if not text and 'blocks' in event:
                 try:
-                    from itertools import chain
-                    block_texts = []
-                    for block in event['blocks']:
-                        if block.get('type') == 'rich_text':
-                            for el in block.get('elements', []):
-                                if el.get('type') == 'rich_text_section':
-                                    for sub in el.get('elements', []):
-                                        if sub.get('type') == 'text':
-                                            block_texts.append(sub.get('text',''))
-                        elif block.get('type') == 'section' and 'text' in block:
-                            block_texts.append(block['text'].get('text',''))
-                    text = ' '.join(block_texts).strip()
+                    text = self._extract_text_from_blocks(event.get('blocks', []))
                     logger.debug(f"blocksから再構築したテキスト: {text}")
                 except Exception as e:
                     logger.warning(f"blocksからテキスト再構築失敗: {e}")
@@ -151,12 +146,12 @@ class SlackBot:
                 text = re.sub(r'--style\s+(bullet|paragraph)', '', text).strip()
             
             # URL抽出
-            url_match = re.search(r'https?://[^\s]+', text)
-            if not url_match:
+            urls = self._collect_esa_urls(text, event.get('blocks'), event.get('attachments'))
+            if not urls:
                 say(f"<@{user_id}> ❌ エラー: esaのURLを指定してください\n\n{self._get_help_message()}")
                 return
             
-            url = url_match.group(0)
+            url = urls[0]
             
             # 処理中メッセージ
             say(f"<@{user_id}> 📝 要約を生成中です... (長さ: {length}, 形式: {style})")
@@ -183,6 +178,7 @@ class SlackBot:
             try:
                 with step("gemini_summarize"):
                     summary = self.gemini_client.summarize(title, body, category, length, style)
+                    summary = self._normalize_numbering(summary)
                 
                 # 結果を整形して投稿
                 with step("format_and_send"):
@@ -237,6 +233,7 @@ class SlackBot:
             
             with step("gemini_auto_summarize"):
                 summary = self.gemini_client.summarize(title, body, category, length, style)
+                summary = self._normalize_numbering(summary)
             
             # 結果を整形して投稿
             message_payload = self._format_summary_message(
@@ -264,6 +261,7 @@ class SlackBot:
     
     def _format_summary_message(self, title, category, updated_at, summary, url, length, style, post_number, body_length):
         """要約結果をSlack Block Kit形式で整形"""
+        summary = self._normalize_numbering(summary)
         summary_mrkdwn = self._convert_markdown_to_mrkdwn(summary)
         summary_sections = self._build_summary_sections(summary_mrkdwn)
         fallback_lines = [
@@ -346,8 +344,8 @@ class SlackBot:
                 continue
             converted.append(stripped)
         mrkdwn = "\n".join(converted)
-        mrkdwn = re.sub(r"\*\*(.*?)\*\*", r"*\\1*", mrkdwn)
-        mrkdwn = re.sub(r"__(.*?)__", r"_\\1_", mrkdwn)
+        mrkdwn = re.sub(r"\*\*(.*?)\*\*", r"*\1*", mrkdwn)
+        mrkdwn = re.sub(r"__(.*?)__", r"_\1_", mrkdwn)
         return mrkdwn
 
     def _build_summary_sections(self, summary_text: str):
@@ -376,7 +374,86 @@ class SlackBot:
             chunks.append(remaining[:split_index].rstrip())
             remaining = remaining[split_index:].lstrip()
         return chunks
-    
+
+    def _normalize_numbering(self, summary: str) -> str:
+        """\\1, \\2... のようなプレースホルダを 1,2,3... に置換し直す"""
+        if not summary or "\\" not in summary:
+            return summary
+        lines = []
+        counter = 1
+        for line in summary.splitlines():
+            had_placeholder = bool(re.search(r"\\+\d+", line))
+            if had_placeholder:
+                line = re.sub(r"\\+(?=\d)", "", line)
+                line = re.sub(r"\d+", lambda _m: str(counter), line, count=1)
+                counter += 1
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _extract_text_from_blocks(self, blocks):
+        """blocksからテキストを復元する簡易ヘルパー"""
+        block_texts = []
+        for block in blocks or []:
+            if block.get('type') == 'rich_text':
+                for el in block.get('elements', []):
+                    if el.get('type') == 'rich_text_section':
+                        for sub in el.get('elements', []):
+                            if sub.get('type') == 'text':
+                                block_texts.append(sub.get('text',''))
+                            elif sub.get('type') == 'link' and sub.get('url'):
+                                block_texts.append(sub.get('url',''))
+            elif block.get('type') == 'section' and 'text' in block:
+                block_texts.append(block['text'].get('text',''))
+        return ' '.join(block_texts).strip()
+
+    def _collect_esa_urls(self, text: str, blocks=None, attachments=None):
+        """text/blocks/attachments から esa の投稿URLを集める"""
+        urls = set()
+        # text から
+        for raw in re.findall(r'https?://[^\s>]+', text or ""):
+            clean = self._clean_slack_url(raw)
+            if self._is_esa_post_url(clean):
+                urls.add(clean)
+        # blocks から (リンク要素も拾う)
+        for block in blocks or []:
+            if block.get('type') == 'rich_text':
+                for el in block.get('elements', []):
+                    if el.get('type') == 'rich_text_section':
+                        for sub in el.get('elements', []):
+                            if sub.get('type') == 'link' and sub.get('url'):
+                                clean = self._clean_slack_url(sub.get('url',''))
+                                if self._is_esa_post_url(clean):
+                                    urls.add(clean)
+                            elif sub.get('type') == 'text':
+                                for raw in re.findall(r'https?://[^\s>]+', sub.get('text','')):
+                                    clean = self._clean_slack_url(raw)
+                                    if self._is_esa_post_url(clean):
+                                        urls.add(clean)
+            elif block.get('type') == 'section' and 'text' in block:
+                for raw in re.findall(r'https?://[^\s>]+', block['text'].get('text','')):
+                    clean = self._clean_slack_url(raw)
+                    if self._is_esa_post_url(clean):
+                        urls.add(clean)
+        # attachments から
+        for att in attachments or []:
+            for key in ["original_url", "title_link", "from_url", "fallback", "text"]:
+                val = att.get(key)
+                if isinstance(val, str):
+                    for raw in re.findall(r'https?://[^\s>]+', val):
+                        clean = self._clean_slack_url(raw)
+                        if self._is_esa_post_url(clean):
+                            urls.add(clean)
+        return list(urls)
+
+    def _clean_slack_url(self, url: str) -> str:
+        """<https://...|title> 形式の余分な記号を除去"""
+        url = url.split('|', 1)[0]
+        return url.strip('<>').rstrip(')')
+
+    def _is_esa_post_url(self, url: str) -> bool:
+        """esaの投稿URLか簡易判定"""
+        return bool(re.search(r'https?://[^/\s]+\.esa\.io/posts/\d+', url))
+
     def _get_help_message(self):
         """ヘルプメッセージ"""
         return """
