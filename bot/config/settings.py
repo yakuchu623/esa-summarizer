@@ -4,6 +4,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def _clean_env_value(value: str) -> str:
+    """.envの行末コメント(# ...)を除去し前後空白を削除"""
+    if value is None:
+        return ""
+    return value.split('#', 1)[0].strip()
+
 # ログ設定
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -17,14 +23,15 @@ logging.basicConfig(
 )
 
 # Slack設定
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
+SLACK_BOT_TOKEN = _clean_env_value(os.getenv("SLACK_BOT_TOKEN"))
+SLACK_APP_TOKEN = _clean_env_value(os.getenv("SLACK_APP_TOKEN"))
 
 # 自動要約設定
-ESA_WATCH_CHANNEL_ID = os.getenv("ESA_WATCH_CHANNEL_ID")  # esa更新通知を監視するチャンネルID
+ESA_WATCH_CHANNEL_ID = _clean_env_value(os.getenv("ESA_WATCH_CHANNEL_ID"))  # esa更新通知を監視するチャンネルID
 # 要約結果を投稿するチャンネルID（カンマ区切りで複数指定可）
+_raw_summary_channels = _clean_env_value(os.getenv("ESA_SUMMARY_CHANNEL_ID", ""))
 ESA_SUMMARY_CHANNEL_IDS = [
-    ch.strip() for ch in os.getenv("ESA_SUMMARY_CHANNEL_ID", "").split(",") if ch.strip()
+    ch.strip() for ch in _raw_summary_channels.split(",") if ch.strip()
 ]
 
 # esa設定
@@ -33,7 +40,7 @@ ESA_TEAM_NAME = os.getenv("ESA_TEAM_NAME")
 ESA_API_BASE = "https://api.esa.io/v1"
 
 # Gemini設定
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = _clean_env_value(os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
 
 # 要約設定

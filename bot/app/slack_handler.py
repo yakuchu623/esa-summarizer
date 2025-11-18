@@ -87,7 +87,26 @@ class SlackBot:
         @self.app.event("app_mention")
         def handle_mention(event, say):
             """Botへのメンションを処理"""
-            text = event['text']
+            logger.info(f"メンションイベント受信: {event}")
+            # 安全にテキスト取得（blocksのみの場合のフォールバック）
+            text = event.get('text', '') or ''
+            if not text and 'blocks' in event:
+                try:
+                    from itertools import chain
+                    block_texts = []
+                    for block in event['blocks']:
+                        if block.get('type') == 'rich_text':
+                            for el in block.get('elements', []):
+                                if el.get('type') == 'rich_text_section':
+                                    for sub in el.get('elements', []):
+                                        if sub.get('type') == 'text':
+                                            block_texts.append(sub.get('text',''))
+                        elif block.get('type') == 'section' and 'text' in block:
+                            block_texts.append(block['text'].get('text',''))
+                    text = ' '.join(block_texts).strip()
+                    logger.debug(f"blocksから再構築したテキスト: {text}")
+                except Exception as e:
+                    logger.warning(f"blocksからテキスト再構築失敗: {e}")
             user_id = event['user']
             
             # Botのメンション部分を除去
@@ -156,6 +175,10 @@ class SlackBot:
                 
             except Exception as e:
                 say(f"<@{user_id}> ❌ 要約生成中にエラーが発生しました: {str(e)}")
+        
+        @self.app.error
+        def handle_errors(error):
+            logger.exception(f"Slack Bolt エラー: {error}")
     
     def _process_auto_summary(self, url: str, client, source_channel_id: str):
         """自動要約を処理"""
@@ -361,6 +384,26 @@ class SlackBot:
     
     def start(self):
         """Botを起動"""
+        # トークン/ユーザー確認
+        try:
+            auth = self.app.client.auth_test()
+            logger.info(f"🤖 Bot User ID: {auth.get('user_id')} / Team: {auth.get('team')}")
+        except Exception as e:
+            logger.error(f"auth_test に失敗しました。トークンや権限を確認してください: {e}")
+        # チャンネル存在/参加状況確認
+        try:
+            target_ids = [cid for cid in [ESA_WATCH_CHANNEL_ID, *ESA_SUMMARY_CHANNEL_IDS] if cid]
+            for cid in target_ids:
+                try:
+                    info = self.app.client.conversations_info(channel=cid)
+                    ch = info.get('channel', {})
+                    logger.info(f"🔍 channel={cid} name={ch.get('name')} is_member={ch.get('is_member')} private={ch.get('is_private')}")
+                    if not ch.get('is_member'):
+                        logger.warning(f"Botはチャンネル {cid} に未参加です。/invite で追加してください。")
+                except Exception as ce:
+                    logger.warning(f"conversations.info 取得失敗 channel={cid}: {ce}")
+        except Exception as e:
+            logger.warning(f"チャンネル検査中にエラー: {e}")
         handler = SocketModeHandler(self.app, SLACK_APP_TOKEN)
         logger.info("⚡️ Bolt app is running!")
         logger.info(f"📡 監視チャンネルID: {ESA_WATCH_CHANNEL_ID or '未設定'}")
