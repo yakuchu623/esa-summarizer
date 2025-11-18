@@ -187,6 +187,7 @@ class SlackBot:
             try:
                 with step("gemini_summarize"):
                     summary = self.gemini_client.summarize(title, body, category, length, style)
+                    summary = self._normalize_numbering(summary)
                 
                 # 結果を整形して投稿
                 with step("format_and_send"):
@@ -241,6 +242,7 @@ class SlackBot:
             
             with step("gemini_auto_summarize"):
                 summary = self.gemini_client.summarize(title, body, category, length, style)
+                summary = self._normalize_numbering(summary)
             
             # 結果を整形して投稿
             message_payload = self._format_summary_message(
@@ -268,6 +270,8 @@ class SlackBot:
     
     def _format_summary_message(self, title, category, updated_at, summary, url, length, style, post_number, body_length):
         """要約結果をSlack Block Kit形式で整形"""
+        # 念のためここでも番号プレースホルダを正規化
+        summary = self._normalize_numbering(summary)
         summary_mrkdwn = self._convert_markdown_to_mrkdwn(summary)
         summary_sections = self._build_summary_sections(summary_mrkdwn)
         fallback_lines = [
@@ -350,8 +354,8 @@ class SlackBot:
                 continue
             converted.append(stripped)
         mrkdwn = "\n".join(converted)
-        mrkdwn = re.sub(r"\*\*(.*?)\*\*", r"*\\1*", mrkdwn)
-        mrkdwn = re.sub(r"__(.*?)__", r"_\\1_", mrkdwn)
+        mrkdwn = re.sub(r"\*\*(.*?)\*\*", r"*\1*", mrkdwn)
+        mrkdwn = re.sub(r"__(.*?)__", r"_\1_", mrkdwn)
         return mrkdwn
 
     def _build_summary_sections(self, summary_text: str):
@@ -380,6 +384,22 @@ class SlackBot:
             chunks.append(remaining[:split_index].rstrip())
             remaining = remaining[split_index:].lstrip()
         return chunks
+    
+    def _normalize_numbering(self, summary: str) -> str:
+        """\\1, \\2... のようなプレースホルダを 1,2,3... に置換し直す"""
+        if not summary or "\\" not in summary:
+            return summary
+        lines = []
+        counter = 1
+        for line in summary.splitlines():
+            had_placeholder = bool(re.search(r"\\+\d+", line))
+            if had_placeholder:
+                # バックスラッシュを除去し、先頭の数字のみ順番に振り直す
+                line = re.sub(r"\\+(?=\d)", "", line)
+                line = re.sub(r"\d+", lambda _m: str(counter), line, count=1)
+                counter += 1
+            lines.append(line)
+        return "\n".join(lines)
     
     def _clean_slack_url(self, url: str) -> str:
         """<https://...|title> 形式の余分な記号を除去"""
