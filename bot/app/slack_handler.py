@@ -406,7 +406,7 @@ class SlackBot:
         for raw in re.findall(r'https?://[^\s>]+', text or ""):
             clean = self._clean_slack_url(raw)
             if self._is_esa_post_url(clean):
-                urls.add(clean)
+                urls.add(self._normalize_esa_url(clean))
         # blocks から (リンク要素も拾う)
         for block in blocks or []:
             if block.get('type') == 'rich_text':
@@ -416,17 +416,17 @@ class SlackBot:
                             if sub.get('type') == 'link' and sub.get('url'):
                                 clean = self._clean_slack_url(sub.get('url',''))
                                 if self._is_esa_post_url(clean):
-                                    urls.add(clean)
+                                    urls.add(self._normalize_esa_url(clean))
                             elif sub.get('type') == 'text':
                                 for raw in re.findall(r'https?://[^\s>]+', sub.get('text','')):
                                     clean = self._clean_slack_url(raw)
                                     if self._is_esa_post_url(clean):
-                                        urls.add(clean)
+                                        urls.add(self._normalize_esa_url(clean))
             elif block.get('type') == 'section' and 'text' in block:
                 for raw in re.findall(r'https?://[^\s>]+', block['text'].get('text','')):
                     clean = self._clean_slack_url(raw)
                     if self._is_esa_post_url(clean):
-                        urls.add(clean)
+                        urls.add(self._normalize_esa_url(clean))
         # attachments から
         for att in attachments or []:
             for key in ["original_url", "title_link", "from_url", "fallback", "text"]:
@@ -435,7 +435,7 @@ class SlackBot:
                     for raw in re.findall(r'https?://[^\s>]+', val):
                         clean = self._clean_slack_url(raw)
                         if self._is_esa_post_url(clean):
-                            urls.add(clean)
+                            urls.add(self._normalize_esa_url(clean))
         return list(urls)
 
     def _clean_slack_url(self, url: str) -> str:
@@ -446,6 +446,14 @@ class SlackBot:
     def _is_esa_post_url(self, url: str) -> bool:
         """esaの投稿URLか簡易判定"""
         return bool(re.search(r'https?://[^/\s]+\.esa\.io/posts/\d+', url))
+
+    def _normalize_esa_url(self, url: str) -> str:
+        """esaのURLを正規化（/revisions/... などを除去）"""
+        # posts/123 までを抽出
+        match = re.search(r'(https?://[^/\s]+\.esa\.io/posts/\d+)', url)
+        if match:
+            return match.group(1)
+        return url
 
     def _get_help_message(self):
         """ヘルプメッセージ"""
