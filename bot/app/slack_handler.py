@@ -15,6 +15,16 @@ class SlackBot:
         self.app = App(token=SLACK_BOT_TOKEN)
         self.esa_client = EsaClient()
         self.gemini_client = GeminiClient()
+        
+        # BotのユーザーIDを取得
+        try:
+            auth = self.app.client.auth_test()
+            self.bot_user_id = auth.get("user_id")
+            logger.info(f"Bot User ID: {self.bot_user_id}")
+        except Exception as e:
+            logger.error(f"Failed to get bot user ID: {e}")
+            self.bot_user_id = None
+
         if DEBUG_VERBOSE:
             @self.app.middleware  # 全イベント生ボディをログ
             def log_raw(logger_mw, body, next):
@@ -36,23 +46,15 @@ class SlackBot:
             with step("message_event"):
                 log_kv("message.meta", subtype=event.get('subtype'), channel=event.get('channel'))
             
-            # 削除のサブタイプは無視（bot_message, message_changedは処理する）
+            # 削除のサブタイプは無視（bot_messageのみ処理する。message_changedは重複防止のため無視）
             subtype = event.get('subtype')
-            if subtype and subtype not in ['bot_message', 'message_changed']:
+            if subtype and subtype not in ['bot_message']:
                 logger.debug(f"サブタイプ '{subtype}' のため無視")
                 return
             
-            # message_changedの場合は、メッセージ内容を取得
-            if subtype == 'message_changed':
-                message = event.get('message', {})
-                text = message.get('text', '')
-                bot_id = message.get('bot_id')
-                bot_profile = message.get('bot_profile')
-                logger.debug(f"メッセージ更新を検出: bot_id={bot_id}")
-            else:
-                text = event.get('text', '')
-                bot_id = event.get('bot_id')
-                bot_profile = event.get('bot_profile')
+            text = event.get('text', '')
+            bot_id = event.get('bot_id')
+            bot_profile = event.get('bot_profile')
             
             # blocksのみの場合のフォールバック（esa通知でtextが空になるケース対応）
             if not text and 'blocks' in event:
@@ -79,6 +81,11 @@ class SlackBot:
                 return  # 人間のメッセージは無視
             
             logger.info(f"Botメッセージを検出: bot_id={bot_id}, チャンネルID={channel_id}")
+            
+            # 自分のメッセージは無視
+            if self.bot_user_id and event.get('user') == self.bot_user_id:
+                logger.debug("自分のメッセージのため無視")
+                return
             
             # esa URLを抽出（text/blocks/attachments すべてを見る）
             urls = self._collect_esa_urls(text, event.get('blocks'), event.get('attachments'))
@@ -281,15 +288,6 @@ class SlackBot:
                     "emoji": True
                 }
             },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"<{url}|esa #{post_number or '?'}>"
-                    }
-                ]
-            },
             {"type": "section", "fields": metadata_elements},
             {"type": "divider"},
             *summary_sections,
@@ -481,11 +479,10 @@ class SlackBot:
     def start(self):
         """Botを起動"""
         # トークン/ユーザー確認
-        try:
-            auth = self.app.client.auth_test()
-            logger.info(f"🤖 Bot User ID: {auth.get('user_id')} / Team: {auth.get('team')}")
-        except Exception as e:
-            logger.error(f"auth_test に失敗しました。トークンや権限を確認してください: {e}")
+        if self.bot_user_id:
+             logger.info(f"🤖 Bot User ID: {self.bot_user_id}")
+        else:
+             logger.error(f"auth_test に失敗している可能性があります。")
         # チャンネル存在/参加状況確認
         try:
             target_ids = [cid for cid in [ESA_WATCH_CHANNEL_ID, *ESA_SUMMARY_CHANNEL_IDS] if cid]
