@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-PROJECT_ID="esa-summarizer"
+PROJECT_ID="esa-summary"
 REGION="asia-northeast1"
-SERVICE_NAME="esa-summarizer"
+SERVICE_NAME="esa-summary"
 
 echo "🔑 Secret Manager 設定スクリプト"
 echo "----------------------------------------"

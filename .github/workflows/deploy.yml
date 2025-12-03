@@ -9,7 +9,7 @@ on:
 env:
   REGION: asia-northeast1
   REPO_NAME: esa-summarizer-repo
-  SERVICE_NAME: esa-summarizer
+  SERVICE_NAME: esa-summary
   # Secrets required:
   # GCP_PROJECT_ID
   # GCP_WORKLOAD_IDENTITY_PROVIDER
@@ -57,4 +57,6 @@ jobs:
             --no-cpu-throttling \
             --service-account ${{ secrets.GCP_SERVICE_ACCOUNT }} \
             --allow-unauthenticated \
+            --set-secrets="SLACK_BOT_TOKEN=slack-bot-token:latest,SLACK_APP_TOKEN=slack-app-token:latest,ESA_ACCESS_TOKEN=esa-access-token:latest,ESA_TEAM_NAME=esa-team-name:latest,GEMINI_API_KEY=gemini-api-key:latest,ESA_WATCH_CHANNEL_ID=esa-watch-channel-id:latest,ESA_SUMMARY_CHANNEL_ID=esa-summary-channel-id:latest" \
+            --set-env-vars="LOG_LEVEL=INFO" \
             --quiet
